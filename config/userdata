@@ -1,0 +1,133 @@
+#!/bin/bash
+#########################################################
+# LEMP Stack install
+#########################################################
+sudo apt update && sudo apt upgrade -y 
+sudo apt install -y nginx mariadb-server mariadb-client
+sudo chown www-data:www-data /usr/share/nginx/html -R
+sudo systemctl enable nginx
+sudo systemctl start nginx 
+sudo systemctl enable mariadb
+
+sudo systemctl start mariadb
+sudo mysql_secure_installation << EOF
+
+y
+n
+y
+y
+y
+y
+EOF
+sudo apt install php8.1 php8.1-fpm php8.1-mysql php-common php8.1-cli php8.1-common php8.1-opcache php8.1-readline php8.1-mbstring php8.1-xml php8.1-gd php8.1-curl -y
+sudo systemctl enable php8.1-fpm
+sudo systemctl start php8.1-fpm
+sudo cat << EOF > /etc/php/8.1/fpm/conf.d/60-custom.ini
+; Maximum amount of memory a script may consume. Default is 128M
+memory_limit = 512M
+
+; Maximum allowed size for uploaded files. Default is 2M.
+upload_max_filesize = 20M
+
+; Maximum size of POST data that PHP will accept. Default is 2M.
+post_max_size = 20M
+
+; The OPcache shared memory storage size. Default is 128
+opcache.memory_consumption=256
+
+; The amount of memory for interned strings in Mbytes. Default is 8.
+opcache.interned_strings_buffer=32
+EOF
+sudo systemctl reload php8.1-fpm
+sudo rm /usr/share/nginx/html/info.php
+#########################################################
+## Wordpress install
+#########################################################
+wget https://wordpress.org/latest.zip
+sudo apt install unzip
+sudo mkdir -p /usr/share/nginx
+sudo unzip latest.zip -d /usr/share/nginx/
+sudo mv /usr/share/nginx/wordpress /usr/share/nginx/${domain}
+sudo mysql -u root -e "CREATE DATABASE wordpress;"
+sudo mysql -u root -e "CREATE USER wpuser@localhost IDENTIFIED BY 'testing';"
+sudo mysql -u root -e "GRANT ALL PRIVILEGES ON wordpress.* to wpuser@localhost;"
+sudo mysql -u root -e "FLUSH PRIVILEGES;"
+sudo cp /usr/share/nginx/${domain}/wp-config-sample.php /usr/share/nginx/${domain}/wp-config.php
+sudo sed -ie "s/database_name_here/wordpress/" /usr/share/nginx/${domain}/wp-config.php
+sudo sed -ie "s/username_here/wpuser/" /usr/share/nginx/${domain}/wp-config.php
+sudo sed -ie "s/password_here/testing/" /usr/share/nginx/${domain}/wp-config.php
+PREFIX=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 5 ; echo '')
+sudo sed -ie "s/$table_prefix = 'wp_';/$table_prefix = '$${PREFIX}_';/" /usr/share/nginx/${domain}/wp-config.php
+sudo chmod 640 /usr/share/nginx/${domain}/wp-config.php
+sudo chown www-data:www-data /usr/share/nginx/${domain}/ -R
+sudo cat <<-EOF > /etc/nginx/conf.d/${domain}.conf
+server {
+  listen 80;
+  listen [::]:80;
+  server_name www.${domain} ${domain};
+  root /usr/share/nginx/${domain}/;
+  index index.php index.html index.htm index.nginx-debian.html;
+
+  error_log /var/log/nginx/wordpress.error;
+  access_log /var/log/nginx/wordpress.access;
+
+  location / {
+    try_files \$uri \$uri/ /index.php;
+  }
+
+   location ~ ^/wp-json/ {
+     rewrite ^/wp-json/(.*?)$ /?rest_route=/\$1 last;
+   }
+
+  location ~* /wp-sitemap.*\.xml {
+    try_files \$uri \$uri/ /index.php\$is_args\$args;
+  }
+
+  error_page 404 /404.html;
+  error_page 500 502 503 504 /50x.html;
+
+  client_max_body_size 20M;
+
+  location = /50x.html {
+    root /usr/share/nginx/html;
+  }
+
+  location ~ \.php$ {
+    fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    include fastcgi_params;
+    include snippets/fastcgi-php.conf;
+    fastcgi_buffers 1024 4k;
+    fastcgi_buffer_size 128k;
+  }
+
+  #enable gzip compression
+  gzip on;
+  gzip_vary on;
+  gzip_min_length 1000;
+  gzip_comp_level 5;
+  gzip_types application/json text/css application/x-javascript application/javascript image/svg+xml;
+  gzip_proxied any;
+
+  # A long browser cache lifetime can speed up repeat visits to your page
+  location ~* \.(jpg|jpeg|gif|png|webp|svg|woff|woff2|ttf|css|js|ico|xml)$ {
+       access_log        off;
+       log_not_found     off;
+       expires           360d;
+  }
+
+  # disable access to hidden files
+  location ~ /\.ht {
+      access_log off;
+      log_not_found off;
+      deny all;
+  }
+}
+EOF
+sudo nginx -t && sudo systemctl reload nginx 
+#########################################################
+## Certificate installation
+#########################################################
+sudo apt install certbot python3-certbot-nginx -y
+sudo certbot --nginx --agree-tos --redirect --hsts --staple-ocsp --register-unsafely-without-email -d ${domain}
+#########################################################
